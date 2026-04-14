@@ -184,9 +184,22 @@ def get_team_members_info(team_name: str) -> str:
 # ---------------------------------------------------------------------------
 # Internal helper: _build_email_body  (NOT a tool — plain function)
 # ---------------------------------------------------------------------------
-def _build_email_body(team_name: str, target_date: str) -> str | None:
+def _build_email_body(
+    team_name: str,
+    target_date: str,
+    include_updates: bool = True,
+    include_mom: bool = True,
+) -> str | None:
     """Internal helper — builds a clean plain-text email body for the given team and date.
-    Returns None if the team is not found."""
+    Returns None if the team is not found.
+
+    include_updates: if True, member updates are included in the body.
+    include_mom: if True, meeting notes (MoM) are included in the body.
+    At least one of them must be True.
+    """
+    if not include_updates and not include_mom:
+        return None
+
     all_teams = get_all_teams()
     include_all = (not team_name) or team_name.strip().lower() == "all"
     if include_all:
@@ -198,35 +211,57 @@ def _build_email_body(team_name: str, target_date: str) -> str | None:
         ]
     if not selected_teams:
         return None
-    all_updates = get_all_teams_updates_by_date(target_date)
+
+    all_updates = get_all_teams_updates_by_date(target_date) if include_updates else []
     updates_by_team: dict[int, list] = {}
     for row in all_updates:
         updates_by_team.setdefault(row["team_id"], []).append(row)
+
     sections: list[str] = []
     for team in selected_teams:
-        team_updates = updates_by_team.get(team["id"], [])
-        missing = get_missing_users_today(team["id"], target_date)
-        member_lines: list[str] = []
-        for row in team_updates:
-            member_lines.append(row["user_name"])
-            member_lines.append(_strip_html(row["content"]))
-            member_lines.append("")
-        notes_row = db_get_meeting_notes(team["id"], target_date)
-        mom_block = ""
-        if notes_row:
-            mom_block = "\n\nMoM / Meeting Notes:\n" + _strip_html(notes_row["content"])
-        missing_note = ""
-        if missing:
-            missing_names = ", ".join(u["user_name"] for u in missing)
-            missing_note = (
-                f"\n\nNote: {missing_names} did not submit an update on {target_date}. "
-                "They have been CC'd on this email."
-            )
+        parts: list[str] = []
+
+        if include_updates:
+            team_updates = updates_by_team.get(team["id"], [])
+            member_lines: list[str] = []
+            for row in team_updates:
+                member_lines.append(row["user_name"])
+                member_lines.append(_strip_html(row["content"]))
+                member_lines.append("")
+            if member_lines:
+                parts.append("\n".join(member_lines).rstrip())
+            else:
+                parts.append("(No updates submitted.)")
+
+            missing = get_missing_users_today(team["id"], target_date)
+            if missing:
+                missing_names = ", ".join(u["user_name"] for u in missing)
+                parts.append(
+                    f"Note: {missing_names} did not submit an update on {target_date}. "
+                    "They have been CC'd on this email."
+                )
+
+        if include_mom:
+            notes_row = db_get_meeting_notes(team["id"], target_date)
+            if notes_row:
+                mom_text = "MoM / Meeting Notes:\n" + _strip_html(notes_row["content"])
+                parts.append(mom_text)
+            else:
+                parts.append(f"No meeting notes recorded for {target_date}.")
+
         header = f"=== Team {team['name']} ===\n\n" if include_all and len(selected_teams) > 1 else ""
-        sections.append(header + "\n".join(member_lines).rstrip() + mom_block + missing_note)
+        sections.append(header + "\n\n".join(parts))
+
+    if include_updates and include_mom:
+        intro = "Please find below the daily updates and meeting notes from the team."
+    elif include_updates:
+        intro = "Please find below the daily updates from the team."
+    else:
+        intro = "Please find below the meeting notes from the team."
+
     body = (
         "Hi Team,\n\n"
-        "Please find below the daily updates from the team.\n\n"
+        f"{intro}\n\n"
         + "\n\n".join(sections)
     )
     return body.strip()
@@ -242,7 +277,7 @@ def summarize_updates(team_name: str, date: Optional[str] = None) -> str:
     IMPORTANT: Display the full returned text exactly as-is. Do not shorten or reformat it."""
     target_date = date if date else str(dt_date.today())
     all_teams = get_all_teams()
-    body = _build_email_body(team_name, target_date)
+    body = _build_email_body(team_name, target_date, include_updates=True, include_mom=True)
     if body is None:
         return (
             f"No team found with name '{team_name}'. "
@@ -255,19 +290,63 @@ def summarize_updates(team_name: str, date: Optional[str] = None) -> str:
 # Tool 7: send_email_report
 # ---------------------------------------------------------------------------
 @tool
-def send_email_report(to_email: str, subject: str, team_name: str, date: Optional[str] = None) -> str:
-    """Send a team update email report.
+def send_email_report(
+    to_email: str,
+    subject: str,
+    team_name: str,
+    date: Optional[str] = None,
+    content_type: str = "updates",
+) -> str:
+    """Send a team email report.
+
+    content_type controls WHAT is sent — this is important:
+      - "updates"  : send ONLY member daily updates (no MoM). Use when the user asks
+                     to send "updates", "daily updates", "standup", "team updates".
+      - "mom"      : send ONLY meeting notes / MoM (no member updates). Use when the
+                     user asks to send "meeting notes", "MoM", "minutes of meeting".
+      - "both"     : send updates AND MoM together. Use ONLY when the user explicitly
+                     asks for both, e.g. "send updates and MoM".
+
+    Default is "updates". NEVER default to "both".
+
     Builds the email body internally — do NOT pass a body parameter.
     Automatically CC's all team members (even those who didn't submit).
-    team_name: team to send for, or 'all' for all teams. Omit the date parameter entirely for today."""
+    team_name: team to send for, or 'all' for all teams.
+    Omit the date parameter entirely for today.
+    """
     target_date = date if date else str(dt_date.today())
     all_teams = get_all_teams()
-    body = _build_email_body(team_name, target_date)
+
+    ct = (content_type or "updates").strip().lower()
+    if ct in ("update", "updates", "daily", "standup"):
+        include_updates, include_mom = True, False
+        default_subject_kind = "Daily Updates"
+    elif ct in ("mom", "meeting_notes", "meeting-notes", "notes", "minutes"):
+        include_updates, include_mom = False, True
+        default_subject_kind = "Meeting Notes"
+    elif ct in ("both", "all", "full"):
+        include_updates, include_mom = True, True
+        default_subject_kind = "Daily Updates & Meeting Notes"
+    else:
+        include_updates, include_mom = True, False
+        default_subject_kind = "Daily Updates"
+
+    body = _build_email_body(
+        team_name,
+        target_date,
+        include_updates=include_updates,
+        include_mom=include_mom,
+    )
     if body is None:
         return (
             f"No team found with name '{team_name}'. "
             f"Available teams: {', '.join(t['name'] for t in all_teams)}."
         )
+
+    # If user didn't give a subject, fall back to a sensible one
+    if not subject or not subject.strip():
+        subject = f"{default_subject_kind} — {target_date}"
+
     include_all = (not team_name) or team_name.strip().lower() == "all"
     cc_emails: list[str] = []
     if include_all:
@@ -286,7 +365,7 @@ def send_email_report(to_email: str, subject: str, team_name: str, date: Optiona
     if success:
         cc_count = len(unique_cc)
         return (
-            f"Email sent successfully to {to_email}"
+            f"Email sent successfully to {to_email} ({default_subject_kind})"
             + (f" with {cc_count} CC recipient(s)." if cc_count else ".")
         )
     return f"Failed to send email: {message}"
@@ -332,8 +411,20 @@ RULES:
 - Use tools to fetch all data — never make up information.
 - When asked about team members, use the user's team name to look them up.
 - ALWAYS display the full data returned by tools directly in your response. Never say "I've got the list" or similar — show the actual content.
-- NEVER summarize, shorten, paraphrase, or rewrite update content submitted by team members. Show it exactly word-for-word as returned by the tool. The full content must appear in your response.
-- For email reports, call send_email_report directly with to_email, subject, team_name, and date. Do NOT pass a body — it builds the body internally. Never call summarize_updates before send_email_report.
+- NEVER summarize, shorten, paraphrase, or rewrite update content submitted by team members. Show it exactly word-for-word as returned by the tool.
+
+EMAIL CONTENT RULES (VERY IMPORTANT — read carefully):
+- When calling send_email_report, you MUST pick the correct content_type based on what the user literally asked for:
+    * User says "send updates", "send daily updates", "send standup", "send team updates"
+        -> content_type="updates"   (member updates ONLY, NO meeting notes)
+    * User says "send meeting notes", "send MoM", "send minutes of meeting", "send notes"
+        -> content_type="mom"       (meeting notes ONLY, NO member updates)
+    * User EXPLICITLY says "send updates AND meeting notes" / "send updates AND MoM" / "send everything" / "send full report"
+        -> content_type="both"
+- NEVER default to "both". If the request is ambiguous, default to "updates".
+- NEVER mix member updates into a meeting-notes email, and NEVER mix meeting notes into an updates email, unless the user explicitly asked for both.
+- For email reports, call send_email_report directly with to_email, subject, team_name, date, and content_type. Do NOT pass a body — it builds the body internally. Never call summarize_updates before send_email_report.
+
 - DATE RULE: Always default to today's date unless the user explicitly says "yesterday", "day before yesterday", a specific date, or asks for multiple days (e.g. "today and yesterday"). Never guess a past date. OMIT the date parameter entirely when you want today — do NOT pass an empty string.
 - FUTURE DATE RULE: If the user asks for updates or wants to send an email for tomorrow or any future date, politely refuse. Updates for future dates do not exist. Do not call any tool in that case.
 - Answer naturally as an assistant, not as a developer.
