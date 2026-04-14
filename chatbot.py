@@ -14,12 +14,9 @@ from email_utils import send_email
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage,SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
-
+from typing import Union
 from pathlib import Path
 from dotenv import load_dotenv, dotenv_values
-
-_ENV_PATH = Path(__file__).parent / ".env"
-load_dotenv(_ENV_PATH, override=True)
 
 
 
@@ -35,6 +32,9 @@ from database import (
     get_meeting_notes as db_get_meeting_notes,
 )
 
+
+_ENV_PATH = Path(__file__).parent / ".env"
+load_dotenv(_ENV_PATH, override=True)
 
 # ---------------------------------------------------------------------------
 # Internal helper
@@ -72,8 +72,9 @@ def _strip_html(html_content: str) -> str:
 # Tool 1: get_user_updates
 # ---------------------------------------------------------------------------
 
+
 @tool
-def get_user_updates(user_name: str, days: int) -> str:
+def get_user_updates(user_name: str, days: Union[int, str] = 1) -> str:
     """Get the last N days of updates for a user identified by name.
     Returns a formatted string with dates and plain-text update content.
     Use this when asked about a specific person's updates.
@@ -83,20 +84,15 @@ def get_user_updates(user_name: str, days: int) -> str:
     user = get_user_by_name(user_name)
     if user is None:
         return f"No user found with name matching '{user_name}'."
-
     updates = get_updates_by_user_and_days(user["id"], days)
     if not updates:
         return f"No updates found for {user['name']} in the last {days} day(s)."
-
     lines = [f"Updates for {user['name']} (last {days} day(s)):\n"]
     for upd in updates:
         lines.append(f"Date: {upd['date']}")
         lines.append(_strip_html(upd["content"]))
         lines.append("")  # blank line between entries
-
     return "\n".join(lines).strip()
-
-
 # ---------------------------------------------------------------------------
 # Tool 2: get_team_updates
 # ---------------------------------------------------------------------------
@@ -366,24 +362,24 @@ TOOLS = [
 # ---------------------------------------------------------------------------
 # LLM (cached — created once per process)
 # ---------------------------------------------------------------------------
-
 @lru_cache(maxsize=1)
 def _get_llm():
     import os
-    # Try environment first, then read .env file directly as fallback
+
     api_key = os.getenv("GROQ_API_KEY") or dotenv_values(_ENV_PATH).get("GROQ_API_KEY")
     if not api_key:
-        raise RuntimeError(
-            f"GROQ_API_KEY not found. Looked in environment and {_ENV_PATH}. "
-            "Make sure the file exists and contains: GROQ_API_KEY=gsk_..."
-        )
-    return ChatGroq(
-        model="llama-3.1-8b-instant",
+        raise RuntimeError("GROQ_API_KEY not found")
+
+    llm = ChatGroq(
+        model="llama-3.3-70b-versatile",
         temperature=0,
         groq_api_key=api_key,
-    ).bind_tools(TOOLS)
+    )
 
-
+    return llm.bind_tools(
+        TOOLS,
+        tool_choice="auto"   # ✅ IMPORTANT
+    )
 _TOOL_MAP = {t.name: t for t in TOOLS}
 
 _SYSTEM_PROMPT = """You are a friendly team update assistant. Today: {today}.

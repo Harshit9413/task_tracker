@@ -3,26 +3,47 @@ import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
-load_dotenv(Path(__file__).parent / ".env")
-
 import streamlit as st
 from streamlit_quill import st_quill
 from datetime import date, timedelta
 from langchain_core.messages import HumanMessage, AIMessage
-
-from database import (
-    init_db, get_all_teams, get_team_by_id, get_user_by_email,
-    create_user, get_updates_by_user, get_update_today,
-    create_update, edit_update, get_users_by_team,
-    get_team_updates_by_date, get_missing_users_today,
-    upsert_meeting_notes, get_meeting_notes,
-    get_all_users_with_teams, get_all_teams_updates_by_date,
-    create_session, get_session_user, delete_session,
-    create_team, update_team_name, get_team_leader,
-)
-from auth import hash_password, verify_password, login_user, logout_user, get_current_user
 from chatbot import run_chatbot_query
 
+
+
+from database import (
+    init_db,
+    get_all_teams,
+    get_team_by_id,
+    get_user_by_email,
+    create_user,
+    get_updates_by_user,
+    get_update_today,
+    create_update,
+    edit_update,
+    get_users_by_team,
+    get_team_updates_by_date,
+    get_missing_users_today,
+    upsert_meeting_notes,
+    get_meeting_notes,
+    get_all_users_with_teams,
+    get_all_teams_updates_by_date,
+    create_session,
+    get_session_user,
+    delete_session,
+    create_team,
+    update_team_name,
+    get_team_leader,
+)
+from auth import (
+    hash_password,
+    verify_password,
+    login_user,
+    logout_user,
+    get_current_user,
+)
+
+load_dotenv(Path(__file__).parent / ".env")
 st.set_page_config(page_title="Team Update Tracker", layout="wide")
 init_db()
 
@@ -30,6 +51,7 @@ init_db()
 # SQLite-backed session helpers
 # Token lives in st.query_params["t"] (survives refresh) and in DB (survives restart).
 # ---------------------------------------------------------------------------
+
 
 def _save_session(user_id: int) -> str:
     """Create a DB session for user_id, put token in URL, return token."""
@@ -69,16 +91,18 @@ def _clear_session() -> None:
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def is_empty_quill(content: str | None) -> bool:
     """Return True if Quill editor returned nothing meaningful."""
     if not content:
         return True
-    return not re.sub(r'<[^>]+>', '', content).strip()
+    return not re.sub(r"<[^>]+>", "", content).strip()
 
 
 # ---------------------------------------------------------------------------
 # Page: Login / Register
 # ---------------------------------------------------------------------------
+
 
 def show_guide():
     st.title("How to Use Team Update Tracker")
@@ -245,7 +269,9 @@ The chatbot knows who you are and which team you belong to. It can answer questi
 """)
 
     st.divider()
-    st.success("You are ready to use the portal. Go to the **Login** or **Register** tab to get started.")
+    st.success(
+        "You are ready to use the portal. Go to the **Login** or **Register** tab to get started."
+    )
 
 
 def show_login_register():
@@ -276,7 +302,9 @@ def show_login_register():
         name = st.text_input("Name", key="reg_name")
         reg_email = st.text_input("Email", key="reg_email")
         reg_password = st.text_input("Password", type="password", key="reg_password")
-        reg_confirm = st.text_input("Confirm Password", type="password", key="reg_confirm")
+        reg_confirm = st.text_input(
+            "Confirm Password", type="password", key="reg_confirm"
+        )
 
         reg_role = st.radio(
             "Register as",
@@ -299,7 +327,9 @@ def show_login_register():
             else:
                 st.warning("No teams available yet. Ask a Team Leader to create one.")
         else:
-            new_team_name = st.text_input("Team name (you will lead this team)", key="reg_team_name")
+            new_team_name = st.text_input(
+                "Team name (you will lead this team)", key="reg_team_name"
+            )
             st.caption("You can edit the team name later from Team Settings.")
 
         if st.button("Register", use_container_width=True, key="register_btn"):
@@ -329,7 +359,9 @@ def show_login_register():
                         role=role,
                         team_id=team_id,
                     )
-                    st.success("Account created successfully! Please switch to the Login tab to sign in.")
+                    st.success(
+                        "Account created successfully! Please switch to the Login tab to sign in."
+                    )
                 except Exception as exc:
                     if "UNIQUE" in str(exc).upper():
                         st.error("An account with that email already exists.")
@@ -343,6 +375,7 @@ def show_login_register():
 # ---------------------------------------------------------------------------
 # Page: Add/Edit Today's Update
 # ---------------------------------------------------------------------------
+
 
 def show_add_update():
     st.header("Today's Update")
@@ -362,7 +395,9 @@ def show_add_update():
             html=True,
             key="add_update_quill",
         )
-        if st.button("Submit Update", use_container_width=True, key="submit_update_btn"):
+        if st.button(
+            "Submit Update", use_container_width=True, key="submit_update_btn"
+        ):
             if is_empty_quill(new_content):
                 st.error("Update cannot be empty.")
             else:
@@ -402,7 +437,9 @@ def show_add_update():
                         st.success("Update saved.")
                         st.rerun()
             with col2:
-                if st.button("Cancel", use_container_width=True, key="cancel_today_btn"):
+                if st.button(
+                    "Cancel", use_container_width=True, key="cancel_today_btn"
+                ):
                     st.session_state.editing_today = False
                     st.rerun()
 
@@ -410,6 +447,7 @@ def show_add_update():
 # ---------------------------------------------------------------------------
 # Page: My Updates
 # ---------------------------------------------------------------------------
+
 
 def show_my_updates():
     st.header("My Updates")
@@ -436,7 +474,9 @@ def show_my_updates():
                 )
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("Save", use_container_width=True, key=f"save_{update['id']}"):
+                    if st.button(
+                        "Save", use_container_width=True, key=f"save_{update['id']}"
+                    ):
                         if is_empty_quill(edited):
                             st.error("Update cannot be empty.")
                         else:
@@ -445,7 +485,9 @@ def show_my_updates():
                             st.success("Update saved.")
                             st.rerun()
                 with col2:
-                    if st.button("Cancel", use_container_width=True, key=f"cancel_{update['id']}"):
+                    if st.button(
+                        "Cancel", use_container_width=True, key=f"cancel_{update['id']}"
+                    ):
                         st.session_state.editing_update_id = None
                         st.rerun()
             else:
@@ -462,6 +504,7 @@ def show_my_updates():
 # ---------------------------------------------------------------------------
 # Page: Team View (Leader only)
 # ---------------------------------------------------------------------------
+
 
 def show_team_view():
     st.header("Team View")
@@ -504,6 +547,7 @@ def show_team_view():
 # ---------------------------------------------------------------------------
 # Page: Meeting Notes (Leader only)
 # ---------------------------------------------------------------------------
+
 
 def show_meeting_notes():
     st.header("Meeting Notes (MoM)")
@@ -564,6 +608,7 @@ def show_meeting_notes():
 # Page: Chatbot (Leader only)
 # ---------------------------------------------------------------------------
 
+
 def show_chatbot():
     col1, col2 = st.columns([6, 1])
     col1.header("Team Update Assistant")
@@ -580,7 +625,9 @@ def show_chatbot():
             st.markdown(msg["content"])
 
     # Input
-    if prompt := st.chat_input("Ask about updates, missing submissions, or send email reports..."):
+    if prompt := st.chat_input(
+        "Ask about updates, missing submissions, or send email reports..."
+    ):
         st.session_state.chat_history.append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
@@ -617,6 +664,7 @@ def show_chatbot():
 # ---------------------------------------------------------------------------
 # Page: All Teams (Manager only)
 # ---------------------------------------------------------------------------
+
 
 def show_all_teams():
     st.header("All Teams Overview")
@@ -662,6 +710,7 @@ def show_all_teams():
 # ---------------------------------------------------------------------------
 # Main routing
 # ---------------------------------------------------------------------------
+
 
 def show_team_settings():
     """Leader-only: view team info and edit team name (one team per leader)."""
@@ -737,7 +786,14 @@ def main():
         if role == "member":
             pages = ["Add Update", "My Updates"]
         elif role == "leader":
-            pages = ["Add Update", "My Updates", "Team View", "Meeting Notes", "Chatbot", "Team Settings"]
+            pages = [
+                "Add Update",
+                "My Updates",
+                "Team View",
+                "Meeting Notes",
+                "Chatbot",
+                "Team Settings",
+            ]
         elif role == "manager":
             pages = ["All Teams", "My Updates"]
         else:
