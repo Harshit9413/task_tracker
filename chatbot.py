@@ -1,9 +1,3 @@
-"""chatbot.py – LangChain agent for Team Daily Update Tracker.
-Leader-only access. All fixes applied.
-
-CHATBOT_VERSION = "v9-followup-context"
-"""
-CHATBOT_VERSION = "v9-followup-context"
 
 import re
 import html as html_module
@@ -697,6 +691,6 @@ def run_chatbot_query(user_input: str, chat_history: list, user_info=None) -> st
         return (getattr(response, "content", "") or
                 "I couldn't find a matching action for your request. "
                 "Try: 'show who updated', 'show who didn't update', 'remind missing users', "
-                "or 'send bob's updates to <email>'.")
+                "or 'send team's updates to <email>'.")
     finally:
         _current_user = None
