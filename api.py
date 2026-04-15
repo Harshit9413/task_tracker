@@ -3,29 +3,33 @@ import html as html_module
 from datetime import date as dt_date
 from functools import lru_cache
 from typing import Union, Optional
+
 from pathlib import Path
+from fastapi import FastAPI
 
 from dotenv import load_dotenv, dotenv_values
+
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
 
+import app
 from email_utils import send_email
 from database import (
     get_user_by_name, get_updates_by_user_and_days, get_all_teams_updates_by_date,
     get_missing_users_today, get_all_teams, get_users_by_team,
     get_team_members_emails, get_meeting_notes as db_get_meeting_notes,
+    get_managers,
 )
-
 _ENV_PATH = Path(__file__).parent / ".env"
 load_dotenv(_ENV_PATH, override=True)
-
+MODEL_NAME = "llama-3.3-70b-versatile"
 
 # ===========================================================================
 # Helpers
 # ===========================================================================
 _current_user = None
-
+app=FastAPI()
 
 def _row_get(row, key, default=None):
     """Safely get a value from a sqlite3.Row OR dict."""
@@ -97,7 +101,7 @@ def _own_team():
         return _find_team(name)
     return None
 
-
+# Kya given user_name current user ki team me hai ya nahi
 def _user_in_own_team(user_name: str) -> bool:
     team = _own_team()
     if not team:
@@ -109,26 +113,41 @@ def _user_in_own_team(user_name: str) -> bool:
 # ===========================================================================
 # Tools
 # ===========================================================================
+
 @tool
 def get_user_updates(user_name: str, days: Union[int, str] = 1) -> str:
-    """Get last N days of updates for a user from your team. Leaders only."""
+    """Get updates of a specific user for the last given number of days."""
+
     err = _check_leader()
     if err:
         return err
+
     if not _user_in_own_team(user_name):
         return f"Access denied: '{user_name}' is not in your team."
-    days = int(days)
+
+    # Convert days safely
+    try:
+        days = int(days)
+        if days < 1:
+            days = 1
+    except Exception:
+        days = 1
+
     user = get_user_by_name(user_name)
     if not user:
         return f"No user found: '{user_name}'."
+
     updates = get_updates_by_user_and_days(user["id"], days)
+
     if not updates:
         return f"No updates for {user['name']} in last {days} day(s)."
+
     lines = [f"Updates for {user['name']} (last {days} day(s)):\n"]
     for u in updates:
         lines.append(f"Date: {u['date']}")
         lines.append(_strip_html(u["content"]))
         lines.append("")
+
     return "\n".join(lines).strip()
 
 
@@ -412,7 +431,7 @@ def _get_llm():
     api_key = os.getenv("GROQ_API_KEY") or dotenv_values(_ENV_PATH).get("GROQ_API_KEY")
     if not api_key:
         raise RuntimeError("GROQ_API_KEY not found")
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0, groq_api_key=api_key)
+    llm = ChatGroq(model=MODEL_NAME, temperature=0, groq_api_key=api_key)
     return llm.bind_tools(TOOLS, tool_choice="auto")
 
 
@@ -480,24 +499,50 @@ def _try_shortcut(user_input: str) -> Optional[str]:
     matches_reminder = _matches_any(text, _REMINDER_PATTERNS)
     asks_about_missing = any(p in text for p in _NOT_UPDATED_INDICATORS)
 
-    # ---------- "Who is the leader / manager" shortcut ----------
-    leader_keywords = ["leader", "manager", "team lead", "team-lead", "head", "admin"]
+   # ---------- "Who is the leader / manager" shortcut ----------
+    leader_keywords = ["leader", "team lead", "team-lead", "head", "admin"]
+    manager_keywords = ["manager", "boss"]
     asks_question = any(w in text for w in ["who", "what", "tell", "show", "list", "give me", "kon", "kaun"])
-    if asks_question and any(kw in text for kw in leader_keywords):
+    asks_leader = any(kw in text for kw in leader_keywords)
+    asks_manager = any(kw in text for kw in manager_keywords)
+
+    if asks_question and (asks_leader or asks_manager):
         team = _own_team()
-        if team:
+        people = []
+
+        # Team leaders (only if user asked about leader, or asked generally)
+        if team and asks_leader:
             members = get_users_by_team(team["id"])
-            leaders = [m for m in members if _is_leader(m)]
-            if not leaders:
-                return f"No leader found for team '{team['name']}'."
-            if len(leaders) == 1:
-                m = leaders[0]
-                return (f"Team leader of '{team['name']}':\n"
-                        f"  - {m['name']} ({m['role']}) — {m['email']}")
-            lines = [f"Team leaders of '{team['name']}':"]
-            for m in leaders:
-                lines.append(f"  - {m['name']} ({m['role']}) — {m['email']}")
-            return "\n".join(lines)
+            people.extend([m for m in members if _is_leader(m) and (m["role"] or "").lower() != "manager"])
+
+        # Org-wide managers (always include if user asked about manager)
+        if asks_manager:
+            people.extend(get_managers())
+
+        # Deduplicate by email
+        seen = set()
+        unique_people = []
+        for p in people:
+            if p["email"] not in seen:
+                seen.add(p["email"])
+                unique_people.append(p)
+
+        _last_context = "leader"
+
+        if not unique_people:
+            label = "manager" if asks_manager else "leader"
+            team_label = f" for team '{team['name']}'" if team else ""
+            return f"No {label} found{team_label}."
+
+        if len(unique_people) == 1:
+            m = unique_people[0]
+            label = "Manager" if (m["role"] or "").lower() == "manager" else "Team leader"
+            return f"{label}:\n  - {m['name']} ({m['role']}) — {m['email']}"
+
+        lines = ["Leaders / Managers:"]
+        for m in unique_people:
+            lines.append(f"  - {m['name']} ({m['role']}) — {m['email']}")
+        return "\n".join(lines)
 
     forward_keywords = ["send", "mail", "email", "forward", "share"]
     has_forward_kw = any(w in text for w in forward_keywords)

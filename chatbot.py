@@ -1,4 +1,3 @@
-
 import re
 import html as html_module
 from datetime import date as dt_date
@@ -16,6 +15,7 @@ from database import (
     get_user_by_name, get_updates_by_user_and_days, get_all_teams_updates_by_date,
     get_missing_users_today, get_all_teams, get_users_by_team,
     get_team_members_emails, get_meeting_notes as db_get_meeting_notes,
+    get_managers,
 )
 
 _ENV_PATH = Path(__file__).parent / ".env"
@@ -26,14 +26,10 @@ load_dotenv(_ENV_PATH, override=True)
 # Helpers
 # ===========================================================================
 _current_user = None
-# Tracks what kind of data the chatbot last showed the user, so follow-ups
-# like "send it to <email>" know what to send. Values: "mom", "updates",
-# "missing", "digest", "members", "leader", None.
-_last_context = None
+_last_context = None  # "mom", "updates", "summary", "missing", "digest", "leader"
 
 
 def _row_get(row, key, default=None):
-    """Safely get a value from a sqlite3.Row OR dict."""
     if row is None:
         return default
     try:
@@ -44,7 +40,6 @@ def _row_get(row, key, default=None):
 
 
 def _is_leader(user) -> bool:
-    """Return True if the user has a leader-like role."""
     if not user:
         return False
     role = (_row_get(user, "role") or "").strip().lower()
@@ -52,7 +47,6 @@ def _is_leader(user) -> bool:
 
 
 def _check_leader() -> Optional[str]:
-    """Return error message if current user is not a leader, else None."""
     if not _current_user:
         return "Access denied: user information not available."
     if not _is_leader(_current_user):
@@ -70,7 +64,6 @@ def _own_team_id() -> Optional[int]:
 
 
 def _strip_html(html_content: str) -> str:
-    """Convert HTML to plain text."""
     if not html_content:
         return ""
     text = html_content
@@ -109,6 +102,31 @@ def _user_in_own_team(user_name: str) -> bool:
         return False
     members = get_users_by_team(team["id"])
     return any(m["name"].lower() == user_name.lower() for m in members)
+
+
+def _lookup_person_email(text: str) -> Optional[str]:
+    """Look up an email by matching a person's name in text.
+    Checks team members + org managers. Tries full name first, then first name.
+    """
+    team = _own_team()
+    candidates = []
+    if team:
+        candidates.extend(get_users_by_team(team["id"]))
+    candidates.extend(get_managers())
+
+    text_l = text.lower()
+    for p in candidates:
+        full = (p["name"] or "").lower().strip()
+        if full and full in text_l:
+            return p["email"]
+    for p in candidates:
+        name = (p["name"] or "").strip()
+        if not name:
+            continue
+        first = name.split()[0].lower()
+        if re.search(rf"\b{re.escape(first)}\b", text_l):
+            return p["email"]
+    return None
 
 
 # ===========================================================================
@@ -275,7 +293,7 @@ def send_email_report(to_email: str, subject: str = "",
     ct = (content_type or "updates").strip().lower()
     if ct in ("mom", "meeting_notes", "meeting-notes", "notes", "minutes"):
         inc_u, inc_m, kind = False, True, "Meeting Notes"
-    elif ct in ("both", "all", "full"):
+    elif ct in ("both", "all", "full", "summary"):
         inc_u, inc_m, kind = True, True, "Daily Updates & Meeting Notes"
     else:
         inc_u, inc_m, kind = True, False, "Daily Updates"
@@ -461,10 +479,8 @@ _DIGEST_PATTERNS = [
     "kisne update kiya", "kisne update di", "kin logon ne update",
 ]
 
-# Read-only indicators (user wants to SEE, not DO)
 _READ_ONLY_WORDS = ["list", "show", "give me", "tell me", "what is", "who is", "display", "view"]
 
-# Phrases that specifically ask about the MISSING / PENDING members
 _NOT_UPDATED_INDICATORS = [
     "not update", "didn't update", "didnt update", "hasn't update", "hasnt update",
     "doesn't update", "doesnt update", "haven't update", "have not update",
@@ -472,9 +488,30 @@ _NOT_UPDATED_INDICATORS = [
     "pending", "missing", "nahi ki", "nahi di", "ni ki", "ni di",
 ]
 
+# Keywords that indicate user wants FULL team summary / report
+_SUMMARY_KEYWORDS = [
+    "summary", "summarize", "summarise", "sumary", "sumery",
+    "all updates", "all the updates", "all sumary", "all the sumary",
+    "full report", "team report", "everything", "complete update",
+    "team summary", "team's summary", "team's update", "teams update",
+    "team update", "all update",
+    "sab updates", "sari updates", "saari updates", "poori summary",
+    "puri summary", "sari summary",
+]
+
+# Follow-up reference words: "this", "that", "it", "same", "above"
+_REFERENCE_WORDS = [" this ", " this.", " this?", " this!", " that ", " that.",
+                    " it ", " it.", " it?", " it!", " same ", " above ",
+                    " yeh ", " ye ", " wahi ", " upar "]
+
 
 def _matches_any(text: str, patterns: list) -> bool:
     return any(p in text for p in patterns)
+
+
+def _has_reference_word(text: str) -> bool:
+    padded = " " + text.strip() + " "
+    return any(w in padded for w in _REFERENCE_WORDS)
 
 
 def _try_shortcut(user_input: str) -> Optional[str]:
@@ -485,97 +522,152 @@ def _try_shortcut(user_input: str) -> Optional[str]:
     matches_digest = _matches_any(text, _DIGEST_PATTERNS)
     matches_reminder = _matches_any(text, _REMINDER_PATTERNS)
     asks_about_missing = any(p in text for p in _NOT_UPDATED_INDICATORS)
+    asks_summary = _matches_any(text, _SUMMARY_KEYWORDS)
     email_match = re.search(r"[\w\.\-+]+@[\w\.\-]+\.\w+", user_input)
 
-    # ---------- Follow-up: "send it to <email>" / "send to <email>" ----------
-    # User previously asked to see MoM / updates / digest etc., and now says
-    # "send to <email>" without specifying what. Use the last shown context.
-    send_words = ["send", "mail", "email", "forward", "share"]
+    send_words = ["send", "mail", "email", "forward", "share", "bhej"]
     has_send_kw = any(w in text for w in send_words)
-    # Heuristic: short query + has email + has send kw + NO specific member name match
-    # + NO explicit content word ("meeting notes", "updates", "digest", etc.)
+
+    # Resolve recipient: explicit email > "manager" keyword > name lookup
+    recipient_email = email_match.group(0) if email_match else None
+    if has_send_kw and not recipient_email:
+        if re.search(r"\b(manager|boss)\b", text):
+            mgrs = get_managers()
+            if mgrs:
+                recipient_email = mgrs[0]["email"]
+        if not recipient_email:
+            recipient_email = _lookup_person_email(text)
+
+    # ---------- Follow-up: "send this to <recipient>" ----------
+    # Triggers when: send keyword + recipient + (reference word OR no content word)
+    # AND previous context exists.
     has_content_word = any(kw in text for kw in [
         "meeting note", "mom", "minute", "update", "digest",
         "standup", "stand-up", "report", "reminder", "missing",
-    ])
-    if has_send_kw and email_match and not has_content_word and _last_context:
-        to_email = email_match.group(0)
+    ]) or asks_summary
+
+    if has_send_kw and recipient_email and _last_context and (
+        _has_reference_word(text) or not has_content_word
+    ):
         if _last_context == "mom":
             return send_email_report.invoke({
-                "to_email": to_email, "content_type": "mom",
+                "to_email": recipient_email, "content_type": "mom",
             })
-        if _last_context == "updates" or _last_context == "digest":
+        if _last_context == "summary":
             return send_email_report.invoke({
-                "to_email": to_email, "content_type": "updates",
+                "to_email": recipient_email, "content_type": "both",
+            })
+        if _last_context in ("updates", "digest"):
+            return send_email_report.invoke({
+                "to_email": recipient_email, "content_type": "updates",
             })
 
-    # ---------- Meeting notes / MoM shortcut ----------
+    # ---------- Meeting notes / MoM ----------
     mom_keywords = ["meeting note", "meeting-note", "meetingnote",
                     "m.o.m", "minutes of meeting", "minutes of the meeting",
                     "meeting minute", "mins of meeting", "mins of the meeting",
                     "team notes", "daily notes"]
     asks_about_mom = any(kw in text for kw in mom_keywords)
-    # Match standalone "mom" as a whole word
     if re.search(r'\bmom\b', text):
         asks_about_mom = True
-    # "send meeting notes to <email>" → send_email_report
-    if asks_about_mom and has_send_kw and email_match:
+    if asks_about_mom and has_send_kw and recipient_email:
         _last_context = "mom"
         return send_email_report.invoke({
-            "to_email": email_match.group(0), "content_type": "mom",
+            "to_email": recipient_email, "content_type": "mom",
         })
-    # Plain "show meeting notes" → display
     if asks_about_mom:
         result = get_meeting_notes_tool.invoke({})
         _last_context = "mom"
         return result
 
-    # ---------- "Who is the leader / manager" shortcut ----------
-    leader_keywords = ["leader", "manager", "team lead", "team-lead", "head", "admin"]
-    asks_question = any(w in text for w in ["who", "what", "tell", "show", "list", "give me", "kon", "kaun"])
-    if asks_question and any(kw in text for kw in leader_keywords):
-        team = _own_team()
-        if team:
-            members = get_users_by_team(team["id"])
-            leaders = [m for m in members if _is_leader(m)]
-            if not leaders:
-                _last_context = "leader"
-                return f"No leader found for team '{team['name']}'."
-            _last_context = "leader"
-            if len(leaders) == 1:
-                m = leaders[0]
-                return (f"Team leader of '{team['name']}':\n"
-                        f"  - {m['name']} ({m['role']}) — {m['email']}")
-            lines = [f"Team leaders of '{team['name']}':"]
-            for m in leaders:
-                lines.append(f"  - {m['name']} ({m['role']}) — {m['email']}")
-            return "\n".join(lines)
+    # ---------- "Who is the leader / manager" (question, no send) ----------
+    leader_keywords = ["leader", "team lead", "team-lead", "head", "admin"]
+    manager_keywords = ["manager", "boss"]
+    asks_question = any(w in text for w in [
+        "who", "what", "tell", "show", "list", "give me", "kon", "kaun"
+    ])
+    asks_leader_q = any(kw in text for kw in leader_keywords)
+    asks_manager_q = any(kw in text for kw in manager_keywords)
 
-    # ---------- Forward user updates: "send <n>'s updates to <email>" ----------
-    # Only triggers when a team member name is actually found in the query.
-    # If not found, falls through to other branches instead of refusing.
-    forward_keywords = ["send", "mail", "email", "forward", "share"]
-    has_forward_kw = any(w in text for w in forward_keywords)
-    has_update_kw = "update" in text
-    if has_forward_kw and has_update_kw and email_match and not is_read_only and not asks_about_missing:
+    if asks_question and (asks_leader_q or asks_manager_q) and not has_send_kw:
         team = _own_team()
-        if team:
+        people = []
+        if team and asks_leader_q:
             members = get_users_by_team(team["id"])
             for m in members:
+                role = (m["role"] or "").lower()
+                if role in ("leader", "lead", "team_leader", "team-leader", "admin"):
+                    people.append(m)
+        if asks_manager_q:
+            people.extend(get_managers())
+
+        seen = set()
+        unique_people = []
+        for p in people:
+            if p["email"] not in seen:
+                seen.add(p["email"])
+                unique_people.append(p)
+
+        _last_context = "leader"
+
+        if not unique_people:
+            label = "manager" if asks_manager_q and not asks_leader_q else "leader"
+            team_label = f" for team '{team['name']}'" if team else ""
+            return f"No {label} found{team_label}."
+
+        if len(unique_people) == 1:
+            m = unique_people[0]
+            role_label = "Manager" if (m["role"] or "").lower() == "manager" else "Team leader"
+            return f"{role_label}:\n  - {m['name']} ({m['role']}) — {m['email']}"
+
+        if asks_manager_q and not asks_leader_q:
+            header = "Managers:"
+        elif asks_leader_q and not asks_manager_q:
+            header = f"Team leaders of '{team['name']}':" if team else "Team leaders:"
+        else:
+            header = "Leaders / Managers:"
+
+        lines = [header]
+        for m in unique_people:
+            lines.append(f"  - {m['name']} ({m['role']}) — {m['email']}")
+        return "\n".join(lines)
+
+    # ---------- Send SUMMARY / full report (MUST come before single-user forward) ----------
+    if has_send_kw and asks_summary and recipient_email:
+        _last_context = "summary"
+        return send_email_report.invoke({
+            "to_email": recipient_email, "content_type": "both",
+        })
+
+    # ---------- Forward ONE user's updates ----------
+    has_update_kw = "update" in text
+    if has_send_kw and has_update_kw and recipient_email and not is_read_only and not asks_about_missing and not asks_summary:
+        team = _own_team()
+        if team:
+            members = get_users_by_team(team["id"])
+            # Skip names that match the recipient (e.g., recipient is "tarun", don't treat "tarun" as subject)
+            recipient_local = recipient_email.split("@")[0].lower()
+            matched_member = None
+            for m in members:
                 first_name = m["name"].split()[0].lower()
+                full_name = m["name"].lower()
+                if first_name in recipient_local or full_name in recipient_local:
+                    continue
                 if re.search(rf"\b{re.escape(first_name)}\b", text):
-                    _last_context = "updates"
-                    return send_user_updates_email.invoke({
-                        "user_name": m["name"],
-                        "to_email": email_match.group(0),
-                    })
-            # No name matched — treat this as "send team updates to <email>"
+                    matched_member = m
+                    break
+            if matched_member:
+                _last_context = "updates"
+                return send_user_updates_email.invoke({
+                    "user_name": matched_member["name"],
+                    "to_email": recipient_email,
+                })
             _last_context = "updates"
             return send_email_report.invoke({
-                "to_email": email_match.group(0), "content_type": "updates",
+                "to_email": recipient_email, "content_type": "updates",
             })
 
-    # ---------- Read-only "who NOT updated" -> missing list ONLY ----------
+    # ---------- Read-only "who NOT updated" -> missing list ----------
     if is_read_only and asks_about_missing:
         _last_context = "missing"
         return get_missing_updates.invoke({})
@@ -585,7 +677,7 @@ def _try_shortcut(user_input: str) -> Optional[str]:
         _last_context = "digest"
         return get_standup_digest.invoke({})
 
-    # ---------- Pure reminder (action, not read-only) ----------
+    # ---------- Pure reminder ----------
     if matches_reminder:
         m = re.search(r"[\w\.\-+]+@[\w\.\-]+\.\w+", user_input)
         manager_email = m.group(0) if m else None
@@ -596,6 +688,11 @@ def _try_shortcut(user_input: str) -> Optional[str]:
     if matches_digest:
         _last_context = "digest"
         return get_standup_digest.invoke({})
+
+    # ---------- Show summary (no send) ----------
+    if asks_summary and not has_send_kw:
+        _last_context = "summary"
+        return summarize_updates.invoke({})
 
     return None
 
@@ -609,17 +706,14 @@ def run_chatbot_query(user_input: str, chat_history: list, user_info=None) -> st
     _current_user = user_info
 
     try:
-        # 1. Leader check
         if not _is_leader(user_info):
             return ("Access denied: only team leaders can use this assistant. "
                     "Please contact your team leader.")
 
-        # 2. Shortcut layer (handles ~95% of queries without LLM)
         shortcut = _try_shortcut(user_input)
         if shortcut is not None:
             return shortcut
 
-        # 3. LLM fallback (STRICT: 1 iteration, 1 tool, 1 result)
         llm = _get_llm()
         lines = [
             f"Name: {_row_get(user_info, 'name', 'Unknown')}",
@@ -633,7 +727,6 @@ def run_chatbot_query(user_input: str, chat_history: list, user_info=None) -> st
         system = SystemMessage(content=_SYSTEM_PROMPT.format(
             today=str(dt_date.today()), user_profile=profile))
 
-        # Trim history
         trimmed = list(chat_history)[-6:]
         safe_history = []
         for msg in trimmed:
@@ -647,12 +740,10 @@ def run_chatbot_query(user_input: str, chat_history: list, user_info=None) -> st
         all_results = []
 
         try:
-            # STRICT: only 1 LLM round, 1 tool call
             response = llm.invoke(messages)
             messages.append(response)
 
             if getattr(response, "tool_calls", None):
-                # Only take the FIRST tool call, ignore the rest
                 tc = response.tool_calls[0]
                 fn = _TOOL_MAP.get(tc["name"])
                 if fn:
@@ -685,7 +776,6 @@ def run_chatbot_query(user_input: str, chat_history: list, user_info=None) -> st
                 return all_results[0]
             return f"⚠️ Error: {err}"
 
-        # STRICT: return ONLY the first tool result
         if all_results:
             return all_results[0]
         return (getattr(response, "content", "") or

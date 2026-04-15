@@ -81,14 +81,10 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 def init_db() -> None:
     """Create all tables and seed demo data if teams table is empty."""
-    # Import here to avoid circular import at module level (auth imports nothing
-    # from database, but database only needs hash_password from auth).
-    # Support both "python -m task_tracker" style (package) and running files
-    # directly from within the task_tracker/ directory (plain module).
     try:
         from task_tracker.auth import hash_password
     except ModuleNotFoundError:
-        from auth import hash_password  # type: ignore[no-redef]
+        from auth import hash_password
 
     conn = _get_conn()
     try:
@@ -113,7 +109,6 @@ def init_db() -> None:
         pw = hash_password("password123")
 
         users = [
-            # (name, email, role, team_id)
             ("Alice Leader",  "alice@example.com",  "leader",  1),
             ("Bob Member",    "bob@example.com",    "member",  1),
             ("Carol Member",  "carol@example.com",  "member",  1),
@@ -130,7 +125,6 @@ def init_db() -> None:
 
         conn.commit()
 
-        # Resolve user ids for seeding updates
         def uid(email: str) -> int:
             return conn.execute(
                 "SELECT id FROM users WHERE email=?", (email,)
@@ -144,9 +138,7 @@ def init_db() -> None:
         today     = date.today().isoformat()
         yesterday = (date.today() - timedelta(days=1)).isoformat()
 
-        # ---- Daily updates ------------------------------------------------
         updates = [
-            # (user_id, date, content)
             (
                 bob_id, yesterday,
                 "<p><strong>Yesterday:</strong></p><ul><li>Implemented login module</li>"
@@ -188,7 +180,6 @@ def init_db() -> None:
                 "<p><strong>Today:</strong></p><ul><li>Starting on API integration</li></ul>"
                 "<p><strong>Blockers:</strong> None</p>",
             ),
-            # carol has NO update for today (demonstrates missing submissions)
         ]
 
         for user_id, upd_date, content in updates:
@@ -207,7 +198,6 @@ def init_db() -> None:
 # ---------------------------------------------------------------------------
 
 def get_all_teams() -> list:
-    """Return all teams ordered by name."""
     conn = _get_conn()
     try:
         return conn.execute("SELECT id, name FROM teams ORDER BY name").fetchall()
@@ -216,7 +206,6 @@ def get_all_teams() -> list:
 
 
 def get_team_by_id(team_id: int):
-    """Return team Row or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -227,7 +216,6 @@ def get_team_by_id(team_id: int):
 
 
 def create_team(name: str) -> int:
-    """Insert a new team. Returns the new team id."""
     conn = _get_conn()
     try:
         cursor = conn.execute("INSERT INTO teams (name) VALUES (?)", (name.strip(),))
@@ -238,7 +226,6 @@ def create_team(name: str) -> int:
 
 
 def update_team_name(team_id: int, name: str) -> None:
-    """Update the name of a team."""
     conn = _get_conn()
     try:
         conn.execute("UPDATE teams SET name=? WHERE id=?", (name.strip(), team_id))
@@ -248,7 +235,6 @@ def update_team_name(team_id: int, name: str) -> None:
 
 
 def get_team_leader(team_id: int):
-    """Return the user Row with role='leader' for a team, or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -270,10 +256,6 @@ def create_user(
     role: str,
     team_id: int | None,
 ) -> int:
-    """Insert a new user and return the new row id.
-
-    Raises sqlite3.IntegrityError on duplicate email.
-    """
     conn = _get_conn()
     try:
         cur = conn.execute(
@@ -287,7 +269,6 @@ def create_user(
 
 
 def get_user_by_email(email: str):
-    """Return user Row or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -298,7 +279,6 @@ def get_user_by_email(email: str):
 
 
 def get_user_by_id(user_id: int):
-    """Return user Row or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -309,7 +289,6 @@ def get_user_by_id(user_id: int):
 
 
 def get_user_by_name(name: str):
-    """Case-insensitive LIKE match; returns first matching Row or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -321,7 +300,6 @@ def get_user_by_name(name: str):
 
 
 def get_users_by_team(team_id: int) -> list:
-    """Return all users (any role) for the given team."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -332,7 +310,6 @@ def get_users_by_team(team_id: int) -> list:
 
 
 def get_all_users_with_teams() -> list:
-    """Return all users joined with teams; includes team_name column."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -348,7 +325,6 @@ def get_all_users_with_teams() -> list:
 
 
 def get_leaders() -> list:
-    """Return all users with role='leader'."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -358,8 +334,18 @@ def get_leaders() -> list:
         conn.close()
 
 
+def get_managers() -> list:
+    """Return all users with role='manager' (org-wide, not tied to a team)."""
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM users WHERE role='manager'"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def get_team_members_emails(team_id: int) -> list[str]:
-    """Return list of email strings for all users in the given team."""
     conn = _get_conn()
     try:
         rows = conn.execute(
@@ -375,10 +361,6 @@ def get_team_members_emails(team_id: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def create_update(user_id: int, content: str, date: str) -> int:
-    """Insert a new daily update and return its id.
-
-    Raises sqlite3.IntegrityError if a record already exists for (user_id, date).
-    """
     conn = _get_conn()
     try:
         cur = conn.execute(
@@ -392,7 +374,6 @@ def create_update(user_id: int, content: str, date: str) -> int:
 
 
 def edit_update(update_id: int, content: str) -> None:
-    """Update content and set updated_at to current timestamp."""
     conn = _get_conn()
     try:
         conn.execute(
@@ -409,7 +390,6 @@ def edit_update(update_id: int, content: str) -> None:
 
 
 def get_updates_by_user(user_id: int) -> list:
-    """Return all updates for a user, newest first."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -421,7 +401,6 @@ def get_updates_by_user(user_id: int) -> list:
 
 
 def get_updates_by_user_and_days(user_id: int, days: int) -> list:
-    """Return updates for the last N days (inclusive), newest first."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -437,7 +416,6 @@ def get_updates_by_user_and_days(user_id: int, days: int) -> list:
 
 
 def get_update_today(user_id: int, date: str):
-    """Return the update Row for (user_id, date) or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -449,10 +427,6 @@ def get_update_today(user_id: int, date: str):
 
 
 def get_team_updates_by_date(team_id: int, date: str) -> list:
-    """Return all updates for a team on a given date.
-
-    Columns: user_name, user_id, update_id, content, created_at, updated_at
-    """
     conn = _get_conn()
     try:
         return conn.execute(
@@ -476,10 +450,6 @@ def get_team_updates_by_date(team_id: int, date: str) -> list:
 
 
 def get_missing_users_today(team_id: int, date: str) -> list:
-    """Return users in the team who have NO update for the given date.
-
-    Columns: user_name, email
-    """
     conn = _get_conn()
     try:
         return conn.execute(
@@ -500,11 +470,6 @@ def get_missing_users_today(team_id: int, date: str) -> list:
 
 
 def get_all_teams_updates_by_date(date: str) -> list:
-    """Return all teams' updates for a given date.
-
-    Columns: team_id, team_name, user_id, user_name, user_role,
-             content, created_at, updated_at
-    """
     conn = _get_conn()
     try:
         return conn.execute(
@@ -540,7 +505,6 @@ def upsert_meeting_notes(
     content: str,
     created_by: int,
 ) -> None:
-    """Insert meeting notes if none exist for (team_id, date), otherwise update."""
     conn = _get_conn()
     try:
         existing = conn.execute(
@@ -572,7 +536,6 @@ def upsert_meeting_notes(
 
 
 def get_meeting_notes(team_id: int, date: str):
-    """Return meeting notes Row for (team_id, date) or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -588,7 +551,6 @@ def get_meeting_notes(team_id: int, date: str):
 # ---------------------------------------------------------------------------
 
 def create_session(token: str, user_id: int, days: int = 7) -> None:
-    """Store a session token linked to user_id, expiring in `days` days."""
     expires_at = (datetime.now() + timedelta(days=days)).isoformat(sep=" ", timespec="seconds")
     conn = _get_conn()
     try:
@@ -602,7 +564,6 @@ def create_session(token: str, user_id: int, days: int = 7) -> None:
 
 
 def get_session_user(token: str):
-    """Return the users Row for a valid, non-expired session token, or None."""
     conn = _get_conn()
     try:
         return conn.execute(
@@ -617,7 +578,6 @@ def get_session_user(token: str):
 
 
 def delete_session(token: str) -> None:
-    """Remove a session token from the store."""
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
