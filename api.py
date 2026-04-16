@@ -7,13 +7,13 @@ from typing import Union, Optional
 from pathlib import Path
 from fastapi import FastAPI
 
+import app
 from dotenv import load_dotenv, dotenv_values
 
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
 
-import app
 from email_utils import send_email
 from database import (
     get_user_by_name, get_updates_by_user_and_days, get_all_teams_updates_by_date,
