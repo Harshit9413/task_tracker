@@ -469,6 +469,32 @@ def get_missing_users_today(team_id: int, date: str) -> list:
         conn.close()
 
 
+def get_team_updates_by_date_range(team_id: int, from_date: str, to_date: str) -> list:
+    """Fetch a team's updates between from_date and to_date (inclusive), newest first."""
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            """
+            SELECT
+                u.id          AS user_id,
+                u.name        AS user_name,
+                u.role        AS user_role,
+                d.id          AS update_id,
+                d.content,
+                d.date,
+                d.created_at,
+                d.updated_at
+            FROM users u
+            JOIN daily_updates d ON d.user_id = u.id
+            WHERE u.team_id = ? AND d.date BETWEEN ? AND ?
+            ORDER BY d.date DESC, u.name
+            """,
+            (team_id, from_date, to_date),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
 def get_all_teams_updates_by_date(date: str) -> list:
     conn = _get_conn()
     try:
@@ -542,6 +568,17 @@ def get_meeting_notes(team_id: int, date: str):
             "SELECT * FROM meeting_notes WHERE team_id=? AND date=?",
             (team_id, date),
         ).fetchone()
+    finally:
+        conn.close()
+
+
+def get_all_meeting_notes(team_id: int) -> list:
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM meeting_notes WHERE team_id=? ORDER BY date DESC",
+            (team_id,),
+        ).fetchall()
     finally:
         conn.close()
 

@@ -449,6 +449,49 @@ def show_add_update():
 # ---------------------------------------------------------------------------
 
 
+def _render_update_card(update, label: str):
+    """Render a single update card with edit support."""
+    today_str = str(date.today())
+    is_today  = str(update["date"]) == today_str
+
+    st.markdown(
+        f"<div style='background:#f8f9fb;border:1px solid #e2e8f0;border-radius:10px;"
+        f"padding:16px 18px;min-height:180px;'>"
+        f"<p style='margin:0 0 8px;font-size:13px;font-weight:600;color:#6366f1;'>{label}</p>"
+        f"<p style='margin:0 0 10px;font-size:12px;color:#94a3b8;'>{update['date']}</p>",
+        unsafe_allow_html=True,
+    )
+    if st.session_state.editing_update_id == update["id"]:
+        edited = st_quill(
+            value=update["content"],
+            placeholder="Write your update...",
+            html=True,
+            key=f"edit_quill_{update['id']}",
+        )
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("Save", use_container_width=True, key=f"save_{update['id']}"):
+                if is_empty_quill(edited):
+                    st.error("Update cannot be empty.")
+                else:
+                    edit_update(update["id"], edited)
+                    st.session_state.editing_update_id = None
+                    st.success("Saved.")
+                    st.rerun()
+        with c2:
+            if st.button("Cancel", use_container_width=True, key=f"cancel_{update['id']}"):
+                st.session_state.editing_update_id = None
+                st.rerun()
+    else:
+        st.markdown(update["content"], unsafe_allow_html=True)
+        st.caption(f"Updated: {update['updated_at']}")
+        if is_today:
+            if st.button("Edit", key=f"edit_btn_{update['id']}"):
+                st.session_state.editing_update_id = update["id"]
+                st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def show_my_updates():
     st.header("My Updates")
     user = get_current_user()
@@ -462,43 +505,86 @@ def show_my_updates():
         st.info("No updates yet.")
         return
 
-    for update in updates:
-        with st.expander(f"{update['date']}"):
-            if st.session_state.editing_update_id == update["id"]:
-                # Edit mode
-                edited = st_quill(
-                    value=update["content"],
-                    placeholder="Write your update...",
-                    html=True,
-                    key=f"edit_quill_{update['id']}",
-                )
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button(
-                        "Save", use_container_width=True, key=f"save_{update['id']}"
-                    ):
-                        if is_empty_quill(edited):
-                            st.error("Update cannot be empty.")
-                        else:
-                            edit_update(update["id"], edited)
-                            st.session_state.editing_update_id = None
-                            st.success("Update saved.")
-                            st.rerun()
-                with col2:
-                    if st.button(
-                        "Cancel", use_container_width=True, key=f"cancel_{update['id']}"
-                    ):
+    today_str     = str(date.today())
+    yesterday_str = str(date.today() - timedelta(days=1))
+
+    today_up     = next((u for u in updates if str(u["date"]) == today_str), None)
+    yesterday_up = next((u for u in updates if str(u["date"]) == yesterday_str), None)
+    older        = [u for u in updates if str(u["date"]) not in (today_str, yesterday_str)]
+
+    # ── Single white card: Yesterday on top, Today below ──────────────────────
+    def _strip(html: str) -> str:
+        h = re.sub(r'<br\s*/?>', '\n', html)
+        h = re.sub(r'</p>|</li>|</div>', '\n', h)
+        h = re.sub(r'<[^>]+>', '', h)
+        import html as _html_mod
+        return re.sub(r'\n{3,}', '\n\n', _html_mod.unescape(h).replace('\xa0', ' ')).strip()
+
+    if yesterday_up:
+        plain_y = _strip(yesterday_up["content"])
+        yesterday_html = f"<p style='white-space:pre-wrap;font-size:14px;color:#000000;margin:0;'>{plain_y}</p>"
+    else:
+        yesterday_html = "<p style='color:#94a3b8;font-size:13px;margin:0;'>No update submitted yesterday.</p>"
+
+    if today_up:
+        plain_t = _strip(today_up["content"])
+        today_html = f"<p style='white-space:pre-wrap;font-size:14px;color:#000000;margin:0;'>{plain_t}</p>"
+    else:
+        today_html = "<p style='color:#94a3b8;font-size:13px;margin:0;'>No update submitted today.</p>"
+
+    card_html = (
+"<div style='background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;"
+"padding:24px 28px;box-shadow:0 2px 8px rgba(0,0,0,0.06);'>"
+"<p style='margin:0 0 2px;font-size:11px;font-weight:700;color:#6366f1;"
+"text-transform:uppercase;letter-spacing:1px;'>Yesterday</p>"
+f"<p style='margin:0 0 8px;font-size:12px;color:#94a3b8;'>{yesterday_str}</p>"
+f"{yesterday_html}"
+"<hr style='border:none;border-top:1px solid #e5e7eb;margin:18px 0;'/>"
+"<p style='margin:0 0 2px;font-size:11px;font-weight:700;color:#10b981;"
+"text-transform:uppercase;letter-spacing:1px;'>Today</p>"
+f"<p style='margin:0 0 8px;font-size:12px;color:#94a3b8;'>{today_str}</p>"
+f"{today_html}"
+"</div>"
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
+
+    # Edit button for today's update (outside the static HTML block)
+    if today_up:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        if st.session_state.editing_update_id == today_up["id"]:
+            edited = st_quill(
+                value=today_up["content"],
+                placeholder="Write your update...",
+                html=True,
+                key=f"edit_quill_{today_up['id']}",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Save", use_container_width=True, key=f"save_{today_up['id']}"):
+                    if is_empty_quill(edited):
+                        st.error("Update cannot be empty.")
+                    else:
+                        edit_update(today_up["id"], edited)
                         st.session_state.editing_update_id = None
+                        st.success("Saved.")
                         st.rerun()
-            else:
-                # View mode
-                st.markdown(update["content"], unsafe_allow_html=True)
-                st.caption(
-                    f"Created: {update['created_at']}  |  Updated: {update['updated_at']}"
-                )
-                if st.button("Edit", key=f"edit_btn_{update['id']}"):
-                    st.session_state.editing_update_id = update["id"]
+            with c2:
+                if st.button("Cancel", use_container_width=True, key=f"cancel_{today_up['id']}"):
+                    st.session_state.editing_update_id = None
                     st.rerun()
+        else:
+            if st.button("Edit Today's Update", key=f"edit_btn_{today_up['id']}"):
+                st.session_state.editing_update_id = today_up["id"]
+                st.rerun()
+
+    # ── Older history ──────────────────────────────────────────────────────────
+    if older:
+        st.markdown("---")
+        st.markdown("#### Update History")
+        for update in older:
+            with st.expander(f"{update['date']}"):
+                st.markdown(update["content"], unsafe_allow_html=True)
+                st.caption(f"Updated: {update['updated_at']}")
 
 
 # ---------------------------------------------------------------------------
@@ -531,17 +617,25 @@ def show_team_view():
 
     st.divider()
 
-    for member in members:
-        member_name = member["name"]
-        with st.expander(member_name):
-            if member["id"] in updates_by_user:
+    submitted_members = [m for m in members if m["id"] in updates_by_user]
+    missing_members = [m for m in members if m["id"] not in updates_by_user]
+
+    if submitted_members:
+        st.subheader("Submitted")
+        for member in submitted_members:
+            with st.expander(member["name"]):
                 upd = updates_by_user[member["id"]]
                 st.markdown(upd["content"], unsafe_allow_html=True)
                 st.caption(
                     f"Created: {upd['created_at']}  |  Updated: {upd['updated_at']}"
                 )
-            else:
-                st.warning("No update submitted")
+    else:
+        st.info("No updates submitted yet.")
+
+    if missing_members:
+        st.subheader("Missing")
+        for member in missing_members:
+            st.warning(f"{member['name']} — No update submitted")
 
 
 # ---------------------------------------------------------------------------
@@ -553,13 +647,25 @@ def show_meeting_notes():
     st.header("Meeting Notes (MoM)")
     user = get_current_user()
     today_str = str(date.today())
-    existing_notes = get_meeting_notes(user["user_team_id"], today_str)
+
+    selected_date = st.date_input("Date", value=date.today(), key="mom_date")
+    date_str = str(selected_date)
+    is_today = date_str == today_str
+
+    existing_notes = get_meeting_notes(user["user_team_id"], date_str)
+
+    # Reset editing state when date changes
+    if st.session_state.get("mom_last_date") != date_str:
+        st.session_state.editing_mom = False
+        st.session_state.mom_last_date = date_str
 
     if "editing_mom" not in st.session_state:
         st.session_state.editing_mom = False
 
+    st.divider()
+
     if existing_notes and not st.session_state.editing_mom:
-        st.success("Meeting notes saved for today.")
+        st.success(f"Meeting notes saved for {date_str}.")
         st.markdown(existing_notes["content"], unsafe_allow_html=True)
         st.caption(
             f"Created: {existing_notes['created_at']}  |  Updated: {existing_notes['updated_at']}"
@@ -572,14 +678,15 @@ def show_meeting_notes():
             st.subheader("Edit Meeting Notes")
             initial_value = existing_notes["content"]
         else:
-            st.info("No meeting notes for today yet. Add them below.")
+            label = "today" if is_today else date_str
+            st.info(f"No meeting notes for {label} yet. Add them below.")
             initial_value = ""
 
         notes_content = st_quill(
             value=initial_value,
             placeholder="Write your update...",
             html=True,
-            key="mom_quill",
+            key=f"mom_quill_{date_str}",
         )
 
         col1, col2 = st.columns(2)
@@ -590,7 +697,7 @@ def show_meeting_notes():
                 else:
                     upsert_meeting_notes(
                         user["user_team_id"],
-                        today_str,
+                        date_str,
                         notes_content,
                         user["user_id"],
                     )

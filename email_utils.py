@@ -56,7 +56,7 @@ def send_email(
             msg["CC"] = ", ".join(cc_emails)
 
         # Plain-text fallback (for clients that don't render HTML)
-        plain_part = MIMEText(body, "plain", "utf-8")
+        plain_part = MIMEText(_to_plain(body), "plain", "utf-8")
 
         # HTML part — simple, clean, widely-compatible structure
         html_body = _build_html(subject, body, smtp_from)
@@ -79,16 +79,38 @@ def send_email(
         return (False, str(e))
 
 
-# ── HTML builder ───────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+def _to_plain(body: str) -> str:
+    """Strip html-body wrapper and all tags to produce a plain-text fallback."""
+    import re as _re, html as _html
+    text = _re.sub(r"<html-body>|</html-body>", "", body)
+    text = _re.sub(r"<br\s*/?>", "\n", text)
+    text = _re.sub(r"</p>|</div>|</li>|</h[1-6]>", "\n", text)
+    text = _re.sub(r"<[^>]+>", "", text)
+    text = _html.unescape(text).replace("\xa0", " ")
+    return _re.sub(r"\n{3,}", "\n\n", text).strip()
+
 
 def _build_html(subject: str, body: str, sender: str) -> str:
-    """Return a responsive, email-client-safe HTML string."""
+    """Return a responsive, email-client-safe HTML string.
 
-    # Convert plain newlines to <br> so paragraph breaks survive HTML rendering
-    html_body_content = "".join(
-        f"<p>{line}</p>" if line.strip() else "<br>"
-        for line in body.splitlines()
-    )
+    If body is wrapped in <html-body>…</html-body> (structured HTML from
+    _build_email_body), it is embedded directly.  Otherwise plain text is
+    converted to <p> tags.
+    """
+    import re as _re
+
+    if "<html-body>" in body:
+        # Extract pre-built HTML content
+        m = _re.search(r"<html-body>(.*?)</html-body>", body, _re.DOTALL)
+        html_body_content = m.group(1).strip() if m else body
+    else:
+        # Plain-text fallback → simple paragraph conversion
+        html_body_content = "".join(
+            f"<p style='margin:0 0 8px;'>{line}</p>" if line.strip() else "<br>"
+            for line in body.splitlines()
+        )
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -97,59 +119,63 @@ def _build_html(subject: str, body: str, sender: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>{subject}</title>
 </head>
-<body style="margin:0;padding:0;background-color:#f4f4f7;font-family:Arial,Helvetica,sans-serif;">
+<body style="margin:0;padding:0;background-color:#f0f2f5;font-family:Arial,Helvetica,sans-serif;">
 
-  <!-- Outer wrapper -->
   <table width="100%" cellpadding="0" cellspacing="0" border="0"
-         style="background-color:#f4f4f7;padding:32px 0;">
+         style="background-color:#f0f2f5;padding:32px 0;">
     <tr>
       <td align="center">
 
-        <!-- Card -->
-        <table width="600" cellpadding="0" cellspacing="0" border="0"
-               style="max-width:600px;width:100%;background-color:#ffffff;
-                      border-radius:8px;overflow:hidden;
-                      box-shadow:0 2px 8px rgba(0,0,0,.08);">
+        <table width="620" cellpadding="0" cellspacing="0" border="0"
+               style="max-width:620px;width:100%;background-color:#ffffff;
+                      border-radius:10px;overflow:hidden;
+                      box-shadow:0 4px 16px rgba(0,0,0,.10);">
 
           <!-- Header -->
           <tr>
-            <td style="background-color:#4f46e5;padding:28px 40px;">
-              <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;
-                         letter-spacing:.3px;">{subject}</h1>
+            <td style="background:linear-gradient(135deg,#4f46e5 0%,#7c3aed 100%);
+                       padding:28px 36px;">
+              <table width="100%" cellpadding="0" cellspacing="0" border="0">
+                <tr>
+                  <td>
+                    <div style="color:#c7d2fe;font-size:11px;font-weight:600;
+                                letter-spacing:1px;text-transform:uppercase;
+                                margin-bottom:4px;">Team Update Tracker</div>
+                    <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;
+                               line-height:1.3;">{subject}</h1>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
 
           <!-- Body -->
           <tr>
-            <td style="padding:36px 40px;color:#374151;font-size:15px;
-                       line-height:1.7;">
+            <td style="padding:32px 36px;color:#374151;font-size:14px;line-height:1.7;">
               {html_body_content}
             </td>
           </tr>
 
           <!-- Divider -->
           <tr>
-            <td style="padding:0 40px;">
+            <td style="padding:0 36px;">
               <hr style="border:none;border-top:1px solid #e5e7eb;margin:0;" />
             </td>
           </tr>
 
           <!-- Footer -->
           <tr>
-            <td style="padding:20px 40px;color:#9ca3af;font-size:12px;
-                       text-align:center;">
+            <td style="padding:18px 36px;color:#9ca3af;font-size:12px;text-align:center;">
               Sent by <strong style="color:#6b7280;">{sender}</strong>
               &nbsp;·&nbsp; Please do not reply directly to this email.
             </td>
           </tr>
 
         </table>
-        <!-- /Card -->
 
       </td>
     </tr>
   </table>
-  <!-- /Outer wrapper -->
 
 </body>
 </html>"""
