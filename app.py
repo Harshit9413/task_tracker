@@ -34,6 +34,10 @@ from database import (
     create_team,
     update_team_name,
     get_team_leader,
+    get_team_schedules,
+    create_email_schedule,
+    toggle_schedule,
+    delete_schedule,
 )
 from auth import (
     hash_password,
@@ -862,6 +866,120 @@ def show_team_settings():
         st.write(f"{role_badge} — **{m['name']}** ({m['email']})")
 
 
+# ---------------------------------------------------------------------------
+# Page: Scheduled Emails (Leader only)
+# ---------------------------------------------------------------------------
+
+
+def show_scheduled_emails():
+    import json
+
+    st.header("Scheduled Emails")
+    user = get_current_user()
+    team_id = user["user_team_id"]
+
+    if not team_id:
+        st.error("You are not assigned to any team.")
+        return
+
+    schedules = get_team_schedules(team_id)
+
+    if schedules:
+        st.subheader("Active Schedules")
+        for s in schedules:
+            recipients = json.loads(s["recipients"])
+            days_label = "Daily" if s["days"] == "daily" else "Weekdays (Mon–Fri)"
+            content_label = {
+                "updates": "Updates only",
+                "mom": "MoM only",
+                "both": "Updates + MoM",
+            }.get(s["content_type"], s["content_type"])
+            cc_label = "Yes" if s["auto_cc_team"] else "No"
+            active = bool(s["is_active"])
+
+            with st.container():
+                col1, col2, col3 = st.columns([5, 1, 1])
+                with col1:
+                    st.markdown(
+                        f"**{s['label']}** &nbsp; `{s['send_time']}` &nbsp; "
+                        f"`{days_label}` &nbsp; `{content_label}`"
+                    )
+                    st.caption(
+                        f"Recipients: {', '.join(recipients) or '(none)'} "
+                        f"&nbsp;|&nbsp; Auto-CC team: {cc_label}"
+                    )
+                with col2:
+                    toggle_val = st.toggle("On", value=active, key=f"toggle_{s['id']}")
+                    if toggle_val != active:
+                        toggle_schedule(s["id"], toggle_val)
+                        st.rerun()
+                with col3:
+                    if st.button("Delete", key=f"del_{s['id']}", type="secondary"):
+                        delete_schedule(s["id"])
+                        st.rerun()
+                st.divider()
+    else:
+        st.info("No scheduled emails yet. Add one below.")
+
+    with st.expander("Add New Schedule", expanded=len(schedules) == 0):
+        label = st.text_input("Label (e.g. 'Evening Report')", key="sched_label")
+        send_time = st.text_input(
+            "Send time (HH:MM, 24-hour)", value="18:00", key="sched_time"
+        )
+        days = st.radio(
+            "Repeat on",
+            ["Daily", "Weekdays (Mon–Fri)"],
+            key="sched_days",
+            horizontal=True,
+        )
+        content_type = st.radio(
+            "Content to include",
+            ["Updates + Meeting Notes", "Updates only", "Meeting Notes only"],
+            key="sched_content",
+            horizontal=True,
+        )
+        auto_cc = st.checkbox(
+            "Auto-CC all team members", value=True, key="sched_auto_cc"
+        )
+        recipients_raw = st.text_area(
+            "Additional recipient emails (comma-separated)",
+            placeholder="manager@company.com, hr@company.com",
+            key="sched_recipients",
+        )
+
+        if st.button("Save Schedule", use_container_width=True, key="sched_save"):
+            import re as _re
+
+            if not _re.match(r"^\d{2}:\d{2}$", send_time.strip()):
+                st.error("Time must be in HH:MM format (e.g. 18:00).")
+            elif not label.strip():
+                st.error("Label cannot be empty.")
+            else:
+                raw_emails = [e.strip() for e in recipients_raw.split(",") if e.strip()]
+                invalid = [e for e in raw_emails if not _re.match(r"[^@]+@[^@]+\.[^@]+", e)]
+                if invalid:
+                    st.error(f"Invalid emails: {', '.join(invalid)}")
+                else:
+                    days_val = "daily" if days == "Daily" else "weekdays"
+                    ct_map = {
+                        "Updates + Meeting Notes": "both",
+                        "Updates only": "updates",
+                        "Meeting Notes only": "mom",
+                    }
+                    create_email_schedule(
+                        team_id=team_id,
+                        created_by=user["user_id"],
+                        label=label.strip(),
+                        send_time=send_time.strip(),
+                        days=days_val,
+                        recipients_json=json.dumps(raw_emails),
+                        auto_cc_team=auto_cc,
+                        content_type=ct_map[content_type],
+                    )
+                    st.success(f"Schedule '{label.strip()}' saved.")
+                    st.rerun()
+
+
 def main():
     # Try to restore session from URL token on page refresh
     if not st.session_state.get("logged_in"):
@@ -903,6 +1021,7 @@ def main():
                 "Meeting Notes",
                 "Chatbot",
                 "Team Settings",
+                "Scheduled Emails",
             ]
         elif role == "manager":
             pages = ["All Teams", "My Updates"]
@@ -931,6 +1050,8 @@ def main():
         show_team_settings()
     elif page == "All Teams":
         show_all_teams()
+    elif page == "Scheduled Emails":
+        show_scheduled_emails()
 
 
 if __name__ == "__main__":
