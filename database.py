@@ -5,6 +5,7 @@ Each public function opens its own connection (via _get_conn()), performs
 its work, and closes the connection in a finally block.
 """
 
+import os
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -13,11 +14,12 @@ from pathlib import Path
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-DB_PATH = Path(__file__).parent / "tracker.db"  # absolute, works from any cwd
+_DEFAULT_DB = Path(__file__).parent / "tracker.db"
 
 
 def _get_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(DB_PATH))
+    db_path = Path(os.environ.get("TRACKER_DB_OVERRIDE") or _DEFAULT_DB)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
@@ -71,6 +73,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS email_schedules (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    team_id       INTEGER NOT NULL REFERENCES teams(id),
+    created_by    INTEGER NOT NULL REFERENCES users(id),
+    label         TEXT NOT NULL,
+    send_time     TEXT NOT NULL,
+    days          TEXT NOT NULL,
+    recipients    TEXT NOT NULL,
+    auto_cc_team  INTEGER DEFAULT 1,
+    content_type  TEXT DEFAULT 'both',
+    is_active     INTEGER DEFAULT 1,
+    created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -618,6 +634,77 @@ def delete_session(token: str) -> None:
     conn = _get_conn()
     try:
         conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Email Schedules
+# ---------------------------------------------------------------------------
+
+def create_email_schedule(
+    team_id: int,
+    created_by: int,
+    label: str,
+    send_time: str,
+    days: str,
+    recipients_json: str,
+    auto_cc_team: bool,
+    content_type: str,
+) -> int:
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """INSERT INTO email_schedules
+               (team_id, created_by, label, send_time, days, recipients, auto_cc_team, content_type)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (team_id, created_by, label, send_time, days, recipients_json,
+             int(auto_cc_team), content_type),
+        )
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def get_team_schedules(team_id: int) -> list:
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM email_schedules WHERE team_id=? ORDER BY created_at DESC",
+            (team_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def get_all_active_schedules() -> list:
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            "SELECT * FROM email_schedules WHERE is_active=1"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def toggle_schedule(schedule_id: int, is_active: bool) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "UPDATE email_schedules SET is_active=? WHERE id=?",
+            (int(is_active), schedule_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_schedule(schedule_id: int) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM email_schedules WHERE id=?", (schedule_id,))
         conn.commit()
     finally:
         conn.close()
