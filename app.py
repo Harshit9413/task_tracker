@@ -726,10 +726,13 @@ def show_chatbot():
     if "chat_history" not in st.session_state:
         st.session_state.chat_history = []
 
+    def _render_chat(text: str):
+        st.markdown(text.replace('\n', '  \n'))
+
     # Display past messages
     for msg in st.session_state.chat_history:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            _render_chat(msg["content"])
 
     # Input
     if prompt := st.chat_input(
@@ -763,7 +766,7 @@ def show_chatbot():
                     "team_name": team_name,
                 }
                 response = run_chatbot_query(prompt, lc_history, user_info=user_info)
-                st.markdown(response)
+                _render_chat(response)
 
         st.session_state.chat_history.append({"role": "assistant", "content": response})
 

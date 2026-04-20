@@ -11,7 +11,7 @@ import app
 from dotenv import load_dotenv, dotenv_values
 
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 
 from email_utils import send_email

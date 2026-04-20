@@ -301,8 +301,7 @@ def _format_update(user_name: str, date: str, raw_content: str) -> str:
         sections.append(("🔹 Tasks Completed", cur_items))
 
     out = [
-        f"📅  Date: {_format_date(date)}",
-        f"👤  Employee: {_format_name(user_name)}",
+        f"👤  {_format_name(user_name)}  —  📅  {_format_date(date)}",
         "",
     ]
     if not sections:
@@ -310,9 +309,10 @@ def _format_update(user_name: str, date: str, raw_content: str) -> str:
         return "\n".join(out)
 
     for label, items in sections:
-        out.append(f"{label}:")
+        out.append(label)
+        out.append("")
         for item in items:
-            out.append(f"  •  {item}")
+            out.append(f"• {item}")
         out.append("")
 
     return "\n".join(out).rstrip()
@@ -502,11 +502,10 @@ def get_meeting_notes_tool(date: Optional[str] = None) -> str:
     notes = db_get_meeting_notes(team["id"], target)
     if not notes:
         return f"No meeting notes found for '{team['name']}' on {_format_date(target)}."
-    divider = "─" * 44
     return "\n".join([
         f"📝  Meeting Notes — {team['name']}",
         f"📅  {_format_date(target)}",
-        divider,
+        "",
         _strip_html(notes["content"]),
     ])
 
@@ -850,6 +849,102 @@ def get_standup_digest(date: Optional[str] = None) -> str:
 
 
 @tool
+def send_missing_list_email(to_email: str, date: Optional[str] = None) -> str:
+    """Send the list of members who have NOT submitted their update today, to an email. Leaders only."""
+    err = _check_leader()
+    if err: return err
+    team = _own_team()
+    if not team: return "Team not found."
+    target = date or str(dt_date.today())
+    missing = get_missing_users_today(team["id"], target)
+    if not missing:
+        return f"✅  Everyone in '{_format_name(team['name'])}' has submitted their update for {_format_date(target)}. No email sent."
+
+    rows_html = ""
+    for i, u in enumerate(missing, 1):
+        name = _format_name(_row_get(u, "user_name", "?"))
+        email = _row_get(u, "email", "—")
+        rows_html += (
+            f"<tr>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;'>{i}</td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;'>⏳ {name}</td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;'>{email}</td>"
+            f"</tr>"
+        )
+
+    body = (
+        f"<html-body>"
+        f"<p style='color:#374151;margin-bottom:20px;'>Hi,<br><br>"
+        f"The following members of <strong>{_format_name(team['name'])}</strong> have "
+        f"<strong>not submitted</strong> their update for <strong>{_format_date(target)}</strong>.</p>"
+        f"<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+        f"<thead><tr style='background:#dc2626;color:#ffffff;'>"
+        f"<th style='padding:10px 12px;'>#</th>"
+        f"<th style='padding:10px 12px;text-align:left;'>Name</th>"
+        f"<th style='padding:10px 12px;text-align:left;'>Email</th>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table>"
+        f"<p style='color:#6b7280;font-size:12px;margin-top:16px;'>Total pending: {len(missing)}</p>"
+        f"</html-body>"
+    )
+    subject = f"Missing Updates — {_format_name(team['name'])} — {_format_date(target)}"
+    ok, msg = send_email(to_email, subject, body, [])
+    return (
+        f"✅  Missing members list ({len(missing)} pending) sent to {to_email}."
+        if ok else f"❌  Failed: {msg}"
+    )
+
+
+@tool
+def send_member_list_email(to_email: str) -> str:
+    """Send team member list (names, roles, emails) to an email address. Leaders only."""
+    err = _check_leader()
+    if err: return err
+    team = _own_team()
+    if not team: return "Team not found."
+    members = get_users_by_team(team["id"])
+    if not members: return f"No members found in '{team['name']}'."
+
+    leaders = [m for m in members if (m["role"] or "").lower() == "leader"]
+    regular = [m for m in members if (m["role"] or "").lower() != "leader"]
+    sorted_members = leaders + regular
+
+    rows_html = ""
+    for i, m in enumerate(sorted_members, 1):
+        role = (m["role"] or "member").capitalize()
+        icon = "👑" if role.lower() == "leader" else "👤"
+        rows_html += (
+            f"<tr>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;'>{i}</td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;'>{icon} {_format_name(m['name'])}</td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:center;'>{role}</td>"
+            f"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;'>{m['email']}</td>"
+            f"</tr>"
+        )
+
+    body = (
+        f"<html-body>"
+        f"<p style='color:#374151;margin-bottom:20px;'>Hi,<br><br>"
+        f"Please find the member list for team <strong>{_format_name(team['name'])}</strong> below.</p>"
+        f"<table style='width:100%;border-collapse:collapse;font-size:13px;'>"
+        f"<thead><tr style='background:#4f46e5;color:#ffffff;'>"
+        f"<th style='padding:10px 12px;'>#</th>"
+        f"<th style='padding:10px 12px;text-align:left;'>Name</th>"
+        f"<th style='padding:10px 12px;'>Role</th>"
+        f"<th style='padding:10px 12px;text-align:left;'>Email</th>"
+        f"</tr></thead><tbody>{rows_html}</tbody></table>"
+        f"<p style='color:#6b7280;font-size:12px;margin-top:16px;'>"
+        f"Total: {len(members)} | 👑 Leaders: {len(leaders)} | 👤 Members: {len(regular)}</p>"
+        f"</html-body>"
+    )
+    subject = f"Team Member List — {_format_name(team['name'])}"
+    ok, msg = send_email(to_email, subject, body, [])
+    return (
+        f"✅  Member list for '{_format_name(team['name'])}' sent to {to_email}."
+        if ok else f"❌  Failed: {msg}"
+    )
+
+
+@tool
 def send_user_updates_email(
     user_name: str,
     to_email: str,
@@ -923,7 +1018,8 @@ TOOLS = [
     get_user_updates, get_team_updates, get_missing_updates,
     get_meeting_notes_tool, get_team_members_info, summarize_updates,
     send_email_report, send_missing_update_reminders,
-    get_standup_digest, send_user_updates_email,
+    get_standup_digest, send_user_updates_email, send_member_list_email,
+    send_missing_list_email,
 ]
 _TOOL_MAP = {t.name: t for t in TOOLS}
 
@@ -980,6 +1076,8 @@ SEND / EMAIL
   send [name] update to [person/email]      → send_user_updates_email(user_name, to_email, days=1)
   send [name] yesterday update to X        → send_user_updates_email(user_name, to_email, days=2)
   send [name] last N days update to X      → send_user_updates_email(user_name, to_email, days=N)
+  send member list to [email/person]           → send_member_list_email(to_email)
+  send list of who not updated to [email]      → send_missing_list_email(to_email)
   send today report / full report to [email] → send_email_report(to_email, content_type="updates", days=1)
   send summary to [email]                    → send_email_report(to_email, content_type="both")
   send last N days report to [email]         → send_email_report(to_email, days=N)
@@ -1060,7 +1158,10 @@ _DIGEST_P = ["standup digest","stand-up digest","stand up digest","today's snaps
 _MISS_P   = ["not update","didn't update","didnt update","hasn't update","not submit",
              "didn't submit","pending","missing","nahi ki","nahi di","ni ki",
              "who not update","who didn't update","who have not","who has not",
-             "kon nahi","kaun nahi"]
+             "kon nahi","kaun nahi",
+             "not udpate","not updaet","not updte","not updat",
+             "list who not","send list who","jisne nahi","jinhone nahi","jinke nahi",
+             "jisne update nahi","jinhone update nahi"]
 _SUM_P    = ["summary","summarize","summarise","all updates","full report","team report",
              "team summary","team update","all update","sab updates","sari updates","poori summary"]
 _TODAY_P  = ["updates today","today's update","todays update","team update today",
@@ -1163,7 +1264,7 @@ def _try_shortcut(user_input: str) -> Optional[str]:
             recip = _email_after_keyword(text) or _email_from_text(text)
 
     # ── "send today to X" — explicit today team report (no member name) ──────────
-    if has_send and recip and _has_today(text):
+    if has_send and recip and _has_today(text) and not asks_miss:
         team = _own_team()
         matched_member = _find_member_in_text(text, get_users_by_team(team["id"])) if team else None
         if not matched_member:
@@ -1172,7 +1273,7 @@ def _try_shortcut(user_input: str) -> Optional[str]:
             return send_email_report.invoke({"to_email": recip, "content_type": "updates", "days": 1})
 
     # ── follow-up "send this to X" ─────────────────────────────────────────────
-    if has_send and recip and _last_context and (_has_ref(text) or not has_update):
+    if has_send and recip and _last_context and not asks_mlist and not asks_miss and (_has_ref(text) or not has_update):
         _days = _detect_days(text)
         if _last_user_sent:
             _last_recipient = recip
@@ -1221,6 +1322,19 @@ def _try_shortcut(user_input: str) -> Optional[str]:
             [label] + [f"  •  {_format_name(p['name'])}  ({p['role']})  —  {p['email']}"
                        for p in unique]
         )
+
+    # ── send missing members list to email ───────────────────────────────────
+    if asks_miss and has_send and recip:
+        _last_context = "missing"; _last_user_sent = None; _last_recipient = recip
+        _miss_date = _extract_date(text) or (_yesterday_date() if _is_yesterday_only(text) else None)
+        args = {"to_email": recip}
+        if _miss_date: args["date"] = _miss_date
+        return send_missing_list_email.invoke(args)
+
+    # ── send member list to email ─────────────────────────────────────────────
+    if asks_mlist and has_send and recip:
+        _last_context = "members"; _last_user_sent = None; _last_recipient = recip
+        return send_member_list_email.invoke({"to_email": recip})
 
     # ── team members list ─────────────────────────────────────────────────────
     if asks_mlist and not has_send:
