@@ -1,14 +1,7 @@
-"""
-scheduler.py — Standalone scheduled email sender.
-
-Run with: python scheduler.py
-Polls every 60 seconds. When a schedule's send_time matches current HH:MM
-and the current day matches the schedule's days setting, sends the email.
-"""
-
 import json
 import logging
 import re
+import threading
 import time
 from datetime import date, datetime
 from pathlib import Path
@@ -25,6 +18,8 @@ from database import (
     get_team_by_id,
     get_team_members_emails,
     get_users_by_team,
+    log_email_send,
+    try_claim_schedule_send,
 )
 from email_utils import send_email
 
@@ -37,6 +32,7 @@ log = logging.getLogger(__name__)
 
 # Tracks (schedule_id, date_str, hhmm) already sent this process run
 _fired: set = set()
+_lock = threading.Lock()
 
 
 def _strip_html(h: str) -> str:
@@ -60,6 +56,21 @@ def _format_date(date_str: str) -> str:
 
 def _format_name(name: str) -> str:
     return " ".join(w.capitalize() for w in (name or "").split())
+
+
+def _build_reminder_body(member_name: str, team_name: str, target: str) -> str:
+    return f"""<html-body>
+    <p style="color:#374151;margin-bottom:16px;">
+      Hi <strong>{_format_name(member_name)}</strong>,<br><br>
+      This is a friendly reminder that your daily update for
+      <strong>{_format_name(team_name)}</strong> —
+      <strong>{_format_date(target)}</strong> has not been submitted yet.<br><br>
+      Please log in and submit your update at your earliest convenience.
+    </p>
+    <p style="color:#6b7280;font-size:13px;">
+      If you have already submitted, please ignore this message.
+    </p>
+    </html-body>"""
 
 
 def _build_schedule_email_body(
@@ -167,6 +178,33 @@ def _fire_schedule(schedule) -> None:
         return
 
     target = date.today().isoformat()
+
+    # Reminder: send individual nudge to each missing member
+    if content_type == "reminder":
+        missing = get_missing_users_today(team_id, target)
+        if not missing:
+            log.info("Schedule '%s' (reminder): no missing members, nothing to send.", label)
+            return
+        subject = f"Reminder: Please submit your daily update — {_format_name(team['name'])} — {_format_date(target)}"
+        sent = 0
+        failed_msgs = []
+        for member in missing:
+            body = _build_reminder_body(member["user_name"], team["name"], target)
+            ok, msg = send_email(member["email"], subject, body)
+            if ok:
+                log.info("Reminder sent to %s <%s>.", member["user_name"], member["email"])
+                sent += 1
+            else:
+                log.error("Failed to send reminder to %s: %s", member["email"], msg)
+                failed_msgs.append(f"{member['email']}: {msg}")
+        log.info("Schedule '%s': sent %d reminder(s).", label, sent)
+        if sent > 0:
+            err = f"{len(failed_msgs)} failed" if failed_msgs else None
+            log_email_send(schedule["id"], team_id, label, "success", sent, err)
+        else:
+            log_email_send(schedule["id"], team_id, label, "failed", 0, "; ".join(failed_msgs))
+        return
+
     inc_updates = content_type in ("updates", "both")
     inc_mom = content_type in ("mom", "both")
 
@@ -183,7 +221,11 @@ def _fire_schedule(schedule) -> None:
     }.get(content_type, "Report")
     subject = f"{kind} — {_format_name(team['name'])} — {_format_date(target)}"
 
-    manual_recipients = json.loads(schedule["recipients"] or "[]")
+    try:
+        manual_recipients = json.loads(schedule["recipients"] or "[]")
+    except json.JSONDecodeError as e:
+        log.error("Schedule '%s': invalid recipients JSON: %s", label, e)
+        return
     team_emails = get_team_members_emails(team_id) if auto_cc_team else []
 
     if not manual_recipients and not team_emails:
@@ -202,13 +244,16 @@ def _fire_schedule(schedule) -> None:
     ok, msg = send_email(to_email, subject, body, cc)
     if ok:
         log.info("Schedule '%s': email sent to %s (CC: %d).", label, to_email, len(cc))
+        log_email_send(schedule["id"], team_id, label, "success", 1 + len(cc))
     else:
         log.error("Schedule '%s': failed to send to %s: %s", label, to_email, msg)
+        log_email_send(schedule["id"], team_id, label, "failed", 0, msg)
 
 
 def run_once() -> None:
     now_hhmm = datetime.now().strftime("%H:%M")
     today_str = date.today().isoformat()
+    sent_key = f"{today_str} {now_hhmm}"
 
     schedules = get_all_active_schedules()
     for s in schedules:
@@ -216,12 +261,27 @@ def run_once() -> None:
             continue
         if not _should_fire_today(s["days"]):
             continue
+
+        # Fast in-process dedup (avoids a DB call on every tick)
         fire_key = (s["id"], today_str, now_hhmm)
-        if fire_key in _fired:
+        with _lock:
+            if fire_key in _fired:
+                continue
+
+        # Atomic DB claim — only one process/thread wins across restarts
+        if not try_claim_schedule_send(s["id"], sent_key):
+            with _lock:
+                _fired.add(fire_key)
             continue
-        _fired.add(fire_key)
+
+        with _lock:
+            _fired.add(fire_key)
+
         log.info("Firing schedule '%s' (id=%d).", s["label"], s["id"])
-        _fire_schedule(s)
+        try:
+            _fire_schedule(s)
+        except Exception as e:
+            log.error("Schedule '%s': unexpected error: %s", s["label"], e)
 
 
 def main() -> None:

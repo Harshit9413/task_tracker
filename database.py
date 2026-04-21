@@ -86,7 +86,19 @@ CREATE TABLE IF NOT EXISTS email_schedules (
     auto_cc_team  INTEGER DEFAULT 1,
     content_type  TEXT DEFAULT 'both',
     is_active     INTEGER DEFAULT 1,
+    last_sent_at  TEXT DEFAULT NULL,
     created_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS email_send_log (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id      INTEGER REFERENCES email_schedules(id) ON DELETE SET NULL,
+    team_id          INTEGER NOT NULL,
+    label            TEXT NOT NULL,
+    sent_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    status           TEXT NOT NULL CHECK(status IN ('success','failed')),
+    recipients_count INTEGER DEFAULT 0,
+    error_message    TEXT DEFAULT NULL
 );
 """
 
@@ -109,6 +121,45 @@ def init_db() -> None:
 
         # Clean up expired sessions on startup
         conn.execute("DELETE FROM sessions WHERE expires_at < datetime('now')")
+        conn.commit()
+
+        # Migrate: add last_sent_at column if missing (existing databases)
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(email_schedules)").fetchall()]
+        if "last_sent_at" not in cols:
+            conn.execute("ALTER TABLE email_schedules ADD COLUMN last_sent_at TEXT DEFAULT NULL")
+            conn.commit()
+
+        # Migrate: create email_send_log table if missing (existing databases)
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS email_send_log (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                schedule_id      INTEGER REFERENCES email_schedules(id) ON DELETE SET NULL,
+                team_id          INTEGER NOT NULL,
+                label            TEXT NOT NULL,
+                sent_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status           TEXT NOT NULL CHECK(status IN ('success','failed')),
+                recipients_count INTEGER DEFAULT 0,
+                error_message    TEXT DEFAULT NULL
+            );
+        """)
+        conn.commit()
+
+        # Seed history from existing last_sent_at records (runs every startup, skips duplicates)
+        sent_schedules = conn.execute(
+            "SELECT id, team_id, label, last_sent_at FROM email_schedules WHERE last_sent_at IS NOT NULL"
+        ).fetchall()
+        for s in sent_schedules:
+            already = conn.execute(
+                "SELECT 1 FROM email_send_log WHERE schedule_id=? AND sent_at=?",
+                (s[0], s[3]),
+            ).fetchone()
+            if not already:
+                conn.execute(
+                    """INSERT INTO email_send_log
+                       (schedule_id, team_id, label, sent_at, status, recipients_count)
+                       VALUES (?,?,?,?,?,?)""",
+                    (s[0], s[1], s[2], s[3], "success", 0),
+                )
         conn.commit()
 
         # Only seed if no teams exist yet
@@ -706,5 +757,57 @@ def delete_schedule(schedule_id: int) -> None:
     try:
         conn.execute("DELETE FROM email_schedules WHERE id=?", (schedule_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def log_email_send(
+    schedule_id: int,
+    team_id: int,
+    label: str,
+    status: str,
+    recipients_count: int = 0,
+    error_message: str = None,
+) -> None:
+    conn = _get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO email_send_log
+               (schedule_id, team_id, label, status, recipients_count, error_message)
+               VALUES (?,?,?,?,?,?)""",
+            (schedule_id, team_id, label, status, recipients_count, error_message),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_team_email_history(team_id: int, limit: int = 100) -> list:
+    conn = _get_conn()
+    try:
+        return conn.execute(
+            """SELECT * FROM email_send_log
+               WHERE team_id = ?
+               ORDER BY sent_at DESC
+               LIMIT ?""",
+            (team_id, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def try_claim_schedule_send(schedule_id: int, sent_key: str) -> bool:
+    """Atomically mark a schedule as sent for sent_key ("YYYY-MM-DD HH:MM").
+    Returns True if this caller claimed it (should send), False if already claimed."""
+    conn = _get_conn()
+    try:
+        cur = conn.execute(
+            """UPDATE email_schedules
+               SET last_sent_at = ?
+               WHERE id = ? AND (last_sent_at IS NULL OR last_sent_at != ?)""",
+            (sent_key, schedule_id, sent_key),
+        )
+        conn.commit()
+        return cur.rowcount == 1
     finally:
         conn.close()

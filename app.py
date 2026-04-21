@@ -38,6 +38,7 @@ from database import (
     create_email_schedule,
     toggle_schedule,
     delete_schedule,
+    get_team_email_history,
 )
 from auth import (
     hash_password,
@@ -50,6 +51,7 @@ from auth import (
 load_dotenv(Path(__file__).parent / ".env")
 st.set_page_config(page_title="Team Update Tracker", layout="wide")
 init_db()
+
 
 # ---------------------------------------------------------------------------
 # SQLite-backed session helpers
@@ -873,6 +875,8 @@ def show_team_settings():
 
 def show_scheduled_emails():
     import json
+    import time as _time
+    from datetime import datetime, timedelta
 
     st.header("Scheduled Emails")
     user = get_current_user()
@@ -881,6 +885,9 @@ def show_scheduled_emails():
     if not team_id:
         st.error("You are not assigned to any team.")
         return
+
+    now = datetime.now()
+    st.info(f"🕐 Current server time: **{now.strftime('%I:%M %p')}** ({now.strftime('%H:%M')} 24-hr) — emails fire at the exact HH:MM you set below.")
 
     schedules = get_team_schedules(team_id)
 
@@ -893,9 +900,27 @@ def show_scheduled_emails():
                 "updates": "Updates only",
                 "mom": "MoM only",
                 "both": "Updates + MoM",
+                "reminder": "Reminder to missing members",
             }.get(s["content_type"], s["content_type"])
             cc_label = "Yes" if s["auto_cc_team"] else "No"
             active = bool(s["is_active"])
+
+            # compute next fire time
+            try:
+                send_dt = datetime.strptime(s["send_time"], "%H:%M").replace(
+                    year=now.year, month=now.month, day=now.day
+                )
+                if send_dt <= now:
+                    send_dt += timedelta(days=1)
+                mins_away = int((send_dt - now).total_seconds() // 60)
+                if mins_away < 60:
+                    next_label = f"in {mins_away} min"
+                elif mins_away < 1440:
+                    next_label = f"in {mins_away // 60}h {mins_away % 60}m"
+                else:
+                    next_label = f"tomorrow at {s['send_time']}"
+            except Exception:
+                next_label = s["send_time"]
 
             with st.container():
                 col1, col2, col3 = st.columns([5, 1, 1])
@@ -906,7 +931,8 @@ def show_scheduled_emails():
                     )
                     st.caption(
                         f"Recipients: {', '.join(recipients) or '(none)'} "
-                        f"&nbsp;|&nbsp; Auto-CC team: {cc_label}"
+                        f"&nbsp;|&nbsp; Auto-CC team: {cc_label} "
+                        f"&nbsp;|&nbsp; ⏰ Next email: **{next_label}**"
                     )
                 with col2:
                     toggle_val = st.toggle("On", value=active, key=f"toggle_{s['id']}")
@@ -934,17 +960,21 @@ def show_scheduled_emails():
         )
         content_type = st.radio(
             "Content to include",
-            ["Updates + Meeting Notes", "Updates only", "Meeting Notes only"],
+            ["Updates + Meeting Notes", "Updates only", "Meeting Notes only", "Reminder (nudge missing members)"],
             key="sched_content",
             horizontal=True,
         )
+        if content_type == "Reminder (nudge missing members)":
+            st.info("A reminder email will be sent directly to each team member who hasn't submitted their update yet. No additional recipients needed.")
         auto_cc = st.checkbox(
-            "Auto-CC all team members", value=True, key="sched_auto_cc"
+            "Auto-CC all team members", value=True, key="sched_auto_cc",
+            disabled=(content_type == "Reminder (nudge missing members)"),
         )
         recipients_raw = st.text_area(
             "Additional recipient emails (comma-separated)",
             placeholder="manager@company.com, hr@company.com",
             key="sched_recipients",
+            disabled=(content_type == "Reminder (nudge missing members)"),
         )
 
         if st.button("Save Schedule", use_container_width=True, key="sched_save"):
@@ -965,6 +995,7 @@ def show_scheduled_emails():
                         "Updates + Meeting Notes": "both",
                         "Updates only": "updates",
                         "Meeting Notes only": "mom",
+                        "Reminder (nudge missing members)": "reminder",
                     }
                     create_email_schedule(
                         team_id=team_id,
@@ -978,6 +1009,41 @@ def show_scheduled_emails():
                     )
                     st.success(f"Schedule '{label.strip()}' saved.")
                     st.rerun()
+
+    # ── Sent History ──────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📬 Sent History")
+
+    history = get_team_email_history(team_id)
+    if history:
+        for h in history:
+            try:
+                sent_dt = datetime.strptime(str(h["sent_at"]), "%Y-%m-%d %H:%M:%S")
+                sent_label = sent_dt.strftime("%-d %b %Y, %I:%M %p")
+            except Exception:
+                sent_label = str(h["sent_at"])
+
+            status_icon = "✅" if h["status"] == "success" else "❌"
+            col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+            with col1:
+                st.markdown(f"**{h['label']}**")
+                if h["error_message"]:
+                    st.caption(f"⚠ {h['error_message']}")
+            with col2:
+                st.caption(sent_label)
+            with col3:
+                st.markdown(f"{status_icon} {h['status'].capitalize()}")
+            with col4:
+                if h["status"] == "success":
+                    st.caption(f"👥 {h['recipients_count']}")
+            st.divider()
+    else:
+        st.info("No emails have been sent yet.")
+
+    # ── Auto-refresh every 60 seconds ─────────────────────────────────────────
+    st.caption("🔄 Auto-refreshing every 60 seconds")
+    _time.sleep(60)
+    st.rerun()
 
 
 def main():
